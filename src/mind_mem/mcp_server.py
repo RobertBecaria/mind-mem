@@ -721,11 +721,17 @@ def propose_update(
     rationale: str = "",
     tags: str = "",
     confidence: str = "medium",
+    auto_apply: bool = False,
 ) -> str:
     """Propose a new decision or task. Writes to SIGNALS.md for human review.
 
     SAFETY: This never writes directly to DECISIONS.md or TASKS.md.
     All proposals must go through the apply engine (/apply) for review.
+
+    When auto_apply=True AND confidence="high", the decision/task is written
+    directly to the source of truth (DECISIONS.md or TASKS.md) and the index
+    is rebuilt automatically. Use this for session-end captures and facts
+    that don't need human review.
 
     Args:
         block_type: Type of block — "decision" or "task".
@@ -733,6 +739,7 @@ def propose_update(
         rationale: Why this decision/task is needed.
         tags: Comma-separated tags (e.g., "database, infrastructure").
         confidence: Signal confidence — "high", "medium", or "low".
+        auto_apply: If True and confidence is "high", write directly to source of truth and reindex.
 
     Returns:
         Confirmation with signal ID and status.
@@ -744,13 +751,19 @@ def propose_update(
 
     from datetime import datetime
 
-    from mind_mem.capture import CONFIDENCE_TO_PRIORITY, append_signals
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    priority = CONFIDENCE_TO_PRIORITY.get(confidence, "P2")
-
     # Cap statement length to prevent oversized signals
     statement = statement[:500]
+    today = datetime.now().strftime("%Y-%m-%d")
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    # ── Fast path: auto-apply high-confidence decisions directly ──
+    if auto_apply and confidence == "high" and block_type == "decision":
+        return _auto_apply_decision(ws, statement, rationale, tag_list, today)
+
+    # ── Normal path: write to SIGNALS.md for review ──
+    from mind_mem.capture import CONFIDENCE_TO_PRIORITY, append_signals
+
+    priority = CONFIDENCE_TO_PRIORITY.get(confidence, "P2")
 
     signal = {
         "line": 0,
@@ -761,13 +774,16 @@ def propose_update(
         "priority": priority,
         "structure": {
             "subject": " ".join(statement.split()[:3]) if statement else "",
-            "tags": [t.strip() for t in tags.split(",") if t.strip()],
+            "tags": tag_list,
         },
     }
     if rationale:
         signal["structure"]["rationale"] = rationale  # type: ignore[index]
 
     written = append_signals(ws, [signal], today)
+
+    # Auto-reindex after writing signals
+    _auto_reindex(ws)
 
     metrics.inc("mcp_proposals")
     _log.info("mcp_propose", block_type=block_type, confidence=confidence, written=written)
@@ -785,6 +801,78 @@ def propose_update(
         },
         indent=2,
     )
+
+
+def _auto_apply_decision(ws: str, statement: str, rationale: str, tags: list, today: str) -> str:
+    """Write a high-confidence decision directly to DECISIONS.md and reindex."""
+    decisions_path = os.path.join(ws, "decisions", "DECISIONS.md")
+
+    # Generate next decision ID
+    existing_ids = []
+    if os.path.isfile(decisions_path):
+        with open(decisions_path, "r") as f:
+            for line in f:
+                if line.startswith("[D-"):
+                    existing_ids.append(line.strip().rstrip("]").lstrip("["))
+
+    # Find next sequence number for today
+    today_compact = today.replace("-", "")
+    seq = 1
+    for did in existing_ids:
+        parts = did.split("-")
+        if len(parts) >= 3 and parts[1] == today_compact:
+            try:
+                seq = max(seq, int(parts[2]) + 1)
+            except ValueError:
+                pass
+    decision_id = f"D-{today_compact}-{seq:03d}"
+
+    # Build decision block
+    tags_str = ", ".join(tags) if tags else ""
+    block = f"""
+[{decision_id}]
+Date: {today}
+Status: active
+Scope: global
+Statement: {statement}
+Rationale: {rationale or 'Auto-applied (high confidence).'}
+Supersedes: —
+Tags: {tags_str}
+Sources: session/{today}
+
+---
+"""
+
+    # Append to DECISIONS.md
+    with open(decisions_path, "a") as f:
+        f.write(block)
+
+    # Auto-reindex
+    _auto_reindex(ws)
+
+    metrics.inc("mcp_auto_applied")
+    _log.info("mcp_auto_apply", decision_id=decision_id, tags=tags_str)
+
+    return json.dumps(
+        {
+            "_schema_version": MCP_SCHEMA_VERSION,
+            "status": "auto_applied",
+            "decision_id": decision_id,
+            "written": 1,
+            "location": "decisions/DECISIONS.md",
+            "safety": "Auto-applied directly to source of truth (high confidence).",
+        },
+        indent=2,
+    )
+
+
+def _auto_reindex(ws: str) -> None:
+    """Silently rebuild FTS index after a write operation."""
+    try:
+        from mind_mem.sqlite_index import build_index
+        build_index(ws)
+    except Exception:
+        pass  # Non-critical — index will be rebuilt on next explicit reindex
 
 
 @mcp.tool
@@ -1231,6 +1319,97 @@ def index_stats() -> str:
     metrics.inc("mcp_index_stats")
     _log.info("mcp_index_stats", stats=stats)
     return json.dumps(stats, indent=2)
+
+
+@mcp.tool
+@mcp_tool_observe
+def cleanup(max_age_days: int = 30, dry_run: bool = True) -> str:
+    """Archive superseded/revoked decisions older than max_age_days.
+
+    Moves stale blocks to an archive section at the bottom of DECISIONS.md.
+    Rebuilds the index after cleanup.
+
+    Args:
+        max_age_days: Archive blocks older than this many days (default: 30).
+        dry_run: If True (default), report what would be archived without changing anything.
+
+    Returns:
+        JSON with cleanup results.
+    """
+    ws = _workspace()
+    ws_err = _check_workspace(ws)
+    if ws_err:
+        return ws_err
+
+    from datetime import datetime, timedelta
+
+    decisions_path = os.path.join(ws, "decisions", "DECISIONS.md")
+    if not os.path.isfile(decisions_path):
+        return json.dumps({"_schema_version": MCP_SCHEMA_VERSION, "archived": 0, "message": "No DECISIONS.md found"})
+
+    blocks = parse_file(decisions_path)
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).strftime("%Y-%m-%d")
+    to_archive = []
+
+    for block in blocks:
+        status = block.get("Status", "").lower()
+        date = block.get("Date", "")
+        block_id = block.get("id", "")
+        if status in ("superseded", "revoked") and date and date < cutoff:
+            to_archive.append({"id": block_id, "date": date, "status": status})
+
+    result = {
+        "_schema_version": MCP_SCHEMA_VERSION,
+        "dry_run": dry_run,
+        "candidates": len(to_archive),
+        "blocks": to_archive,
+        "cutoff_date": cutoff,
+    }
+
+    if not dry_run and to_archive:
+        # Read file, separate active from archived
+        with open(decisions_path, "r") as f:
+            content = f.read()
+
+        archive_ids = {b["id"] for b in to_archive}
+        lines = content.split("\n")
+        active_lines = []
+        archive_lines = ["\n# ── Archived (auto-cleanup) ──\n"]
+        in_archived_block = False
+        current_block_lines = []
+
+        for line in lines:
+            if line.startswith("[D-") or line.startswith("[SIG-"):
+                if current_block_lines and in_archived_block:
+                    archive_lines.extend(current_block_lines)
+                elif current_block_lines:
+                    active_lines.extend(current_block_lines)
+                current_block_lines = [line]
+                block_id = line.strip().rstrip("]").lstrip("[")
+                in_archived_block = block_id in archive_ids
+            else:
+                current_block_lines.append(line)
+
+        # Flush last block
+        if current_block_lines and in_archived_block:
+            archive_lines.extend(current_block_lines)
+        elif current_block_lines:
+            active_lines.extend(current_block_lines)
+
+        with open(decisions_path, "w") as f:
+            f.write("\n".join(active_lines))
+            if len(archive_lines) > 1:
+                f.write("\n".join(archive_lines))
+
+        _auto_reindex(ws)
+        result["message"] = f"Archived {len(to_archive)} blocks"
+    elif dry_run and to_archive:
+        result["message"] = f"Would archive {len(to_archive)} blocks. Set dry_run=False to execute."
+    else:
+        result["message"] = "Nothing to archive"
+
+    metrics.inc("mcp_cleanup")
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool

@@ -23,12 +23,19 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-# Import block parser from same directory
-from .backup_restore import WAL
-from .block_parser import get_by_id, parse_file
-from .corpus_registry import SNAPSHOT_DIRS
-from .mind_filelock import FileLock
-from .namespaces import NamespaceManager
+# Import block parser from same directory (support both package and standalone)
+try:
+    from .backup_restore import WAL
+    from .block_parser import get_by_id, parse_file
+    from .corpus_registry import SNAPSHOT_DIRS
+    from .mind_filelock import FileLock
+    from .namespaces import NamespaceManager
+except ImportError:
+    from backup_restore import WAL
+    from block_parser import get_by_id, parse_file
+    from corpus_registry import SNAPSHOT_DIRS
+    from mind_filelock import FileLock
+    from namespaces import NamespaceManager
 
 # ═══════════════════════════════════════════════
 # Configuration
