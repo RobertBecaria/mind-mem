@@ -426,6 +426,59 @@ Uninstall:
 ./uninstall.sh --purge  # Remove everything including workspace data
 ```
 
+### Automation Hooks (Claude Code)
+
+mind-mem includes optional Claude Code hooks for hands-free memory:
+
+| Hook | Trigger | What it does |
+|------|---------|-------------|
+| **Auto-recall** | Session start/resume | Recalls 5 recent decisions for the current project |
+| **Auto-capture** | Session compact | Extracts signals from session and reindexes |
+
+**Install hooks:**
+
+```bash
+cd mind-mem
+bash hooks/install-hooks.sh --auto   # patches ~/.claude/settings.json
+# Restart Claude Code to activate
+```
+
+**Enhanced MCP tools (this fork):**
+
+| Feature | Usage |
+|---------|-------|
+| **Auto-apply** | `propose_update(auto_apply=True, confidence="high")` — writes directly to DECISIONS.md |
+| **Auto-reindex** | FTS index rebuilt automatically after every write operation |
+| **Cleanup** | `cleanup(max_age_days=30, dry_run=True)` — archives stale decisions |
+
+**Full setup on a new machine:**
+
+```bash
+git clone https://github.com/RobertBecaria/mind-mem.git
+cd mind-mem
+python3 -m venv .venv
+.venv/bin/pip install fastmcp
+
+# Initialize workspace
+.venv/bin/python3 src/mind_mem/init_workspace.py ~/.mind-mem/workspace
+
+# Add to Claude Code MCP config (~/.claude/mcp.json):
+# {
+#   "mcpServers": {
+#     "mind-mem": {
+#       "command": "/path/to/mind-mem/.venv/bin/python3",
+#       "args": ["/path/to/mind-mem/mcp_server.py"],
+#       "env": { "MIND_MEM_WORKSPACE": "~/.mind-mem/workspace" }
+#     }
+#   }
+# }
+
+# Install automation hooks
+bash hooks/install-hooks.sh --auto
+
+# Restart Claude Code
+```
+
 ### Manual Setup
 
 For manual or per-project setup:
