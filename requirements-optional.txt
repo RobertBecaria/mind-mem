@@ -40,5 +40,6 @@ tokenizers==0.22.2 \
     --hash=sha256:369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67
 
 # Cross-encoder reranking models
-sentence-transformers==5.2.3 \
-    --hash=sha256:6437c62d4112b615ddebda362dfc16a4308d604c5b68125ed586e3e95d5b2e30
+sentence-transformers==5.6.0 \
+    --hash=sha256:0e7164d051e416c1853ade7c274ff52af3f9da0f4be7f0b83d734c27699e1057 \
+    --hash=sha256:d2075b5e687a1611005e20ab04a6846994d51adfcf39610aed066af3c0c0b81f
