@@ -5,8 +5,9 @@
 # Update hashes when upgrading versions: pip download --no-deps --dest /tmp/h <pkg>==<ver> && pip hash /tmp/h/*.whl
 
 # MCP server support
-fastmcp==2.14.5 \
-    --hash=sha256:d81e8ec813f5089d3624bec93944beaefa86c0c3a4ef1111cbef676a761ebccf
+fastmcp==3.4.7 \
+    --hash=sha256:43117aca886f5ee2f6a569bba91cef02b59c339aad04ba29950ff18d251c822a \
+    --hash=sha256:e4e7698cb4af5bc667b1901685261fa2f3526dc73d243a461fca42500c8dbe56
 
 # ONNX Runtime for local embedding inference
 onnxruntime==1.24.2 \
